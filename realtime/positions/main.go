@@ -18,6 +18,12 @@ type Options struct {
 	JSONTarget    string
 	HumanReadable bool
 	Apikey        string
+
+	// StaticKey is stamped into every emitted feed header. It identifies the
+	// static GTFS dataset (feed_info.feed_version, or a sha256 fallback) the
+	// trip/brigade mapping was loaded from, letting consumers verify the proto
+	// against the matching static ZIP.
+	StaticKey string
 }
 
 // Create auto-magically creates realtime feeds with position data.
@@ -56,7 +62,7 @@ func Create(api VehicleAPI, brigadeMap map[string][]*brigadeEntry, prevVehicles 
 
 	// 5. Export to GTFS-RT
 	if opts.GtfsRtTarget != "" {
-		err = container.SavePB(opts.GtfsRtTarget, opts.HumanReadable)
+		err = container.SavePB(opts.GtfsRtTarget, opts.HumanReadable, opts.StaticKey)
 	}
 
 	return container.Vehicles, err
@@ -68,6 +74,17 @@ func Main(client *http.Client, gtfsFile *gtfs.Gtfs, opts Options) (err error) {
 	brigadeMap, err := loadBrigades(gtfsFile)
 	if err != nil {
 		return
+	}
+
+	// Callers (single-pass entry point or the loop's brigade resource) are
+	// responsible for stamping opts.StaticKey with the key of the dataset in
+	// use. Resolve it here as a safety net so an unstamped call never emits
+	// an unsigned proto.
+	if opts.StaticKey == "" {
+		opts.StaticKey, err = gtfsFile.StaticKey()
+		if err != nil {
+			return
+		}
 	}
 
 	// Create other objects required by the Create function
@@ -83,6 +100,11 @@ func Main(client *http.Client, gtfsFile *gtfs.Gtfs, opts Options) (err error) {
 type brigadesResource struct {
 	Resource   util.Resource
 	BrigadeMap map[string][]*brigadeEntry
+
+	// StaticKey identifies the static dataset BrigadeMap was loaded from.
+	// It is only replaced together with BrigadeMap, so a failed reload leaves
+	// the previously loaded key and mapping intact.
+	StaticKey string
 }
 
 func (rr *brigadesResource) ShouldUpdate() (bool, error) {
@@ -99,7 +121,10 @@ func (rr *brigadesResource) ShouldUpdate() (bool, error) {
 	return rr.Resource.Check()
 }
 
-// Update automatically updates the RouteMap if the Resource has changed
+// Update automatically updates the RouteMap if the Resource has changed.
+// The in-memory mapping and static key are swapped only after the new GTFS has
+// been fetched, parsed and fully loaded - any error in between keeps serving
+// the previous dataset, so protos remain verifiable against the old static key.
 func (rr *brigadesResource) Update() error {
 	// Check for GTFS updates
 	shouldUpdate, err := rr.ShouldUpdate()
@@ -126,11 +151,22 @@ func (rr *brigadesResource) Update() error {
 			return err
 		}
 
-		// Re-load brigades
-		rr.BrigadeMap, err = loadBrigades(gtfsFile)
+		// Resolve the static key of the new dataset before touching any state.
+		newKey, err := gtfsFile.StaticKey()
 		if err != nil {
 			return err
 		}
+
+		// Re-load brigades
+		newBrigadeMap, err := loadBrigades(gtfsFile)
+		if err != nil {
+			return err
+		}
+
+		// Both derived artifacts are ready - commit the swap together.
+		rr.BrigadeMap = newBrigadeMap
+		rr.StaticKey = newKey
+		log.Printf("gtfs reloaded, static key is now %q", newKey)
 	}
 	return nil
 }
@@ -176,9 +212,13 @@ func Loop(client *http.Client, gtfsResource util.Resource, sleepTime time.Durati
 				time.Sleep(sleep)
 			}
 
-			// Try to update the GTFS-RT
+			// Try to update the GTFS-RT.
+			// Every proto is stamped with the static key of the dataset its
+			// brigade mapping currently comes from.
+			loopOpts := opts
+			loopOpts.StaticKey = br.StaticKey
 			var newPositions map[string]*Vehicle
-			newPositions, err = Create(api, br.BrigadeMap, prevPositions, opts)
+			newPositions, err = Create(api, br.BrigadeMap, prevPositions, loopOpts)
 
 			// If no errors were encountered, break out of the backoff loop
 			if err == nil {

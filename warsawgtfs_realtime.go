@@ -239,7 +239,13 @@ func singleAlerts() error {
 	if err != nil {
 		return err
 	}
-	gtfsFile.Close()
+	defer gtfsFile.Close()
+
+	// Stamp the proto with the key of the static dataset it was built from
+	opts.StaticKey, err = gtfsFile.StaticKey()
+	if err != nil {
+		return err
+	}
 
 	// Make alerts
 	log.Println("Creating alerts")
@@ -259,7 +265,13 @@ func singlePositions() error {
 	if err != nil {
 		return err
 	}
-	gtfsFile.Close()
+	defer gtfsFile.Close()
+
+	// Stamp the proto with the key of the static dataset it was built from
+	opts.StaticKey, err = gtfsFile.StaticKey()
+	if err != nil {
+		return err
+	}
 
 	// Make positions
 	log.Println("Creating positions")

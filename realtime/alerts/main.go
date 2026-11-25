@@ -21,6 +21,11 @@ type Options struct {
 	JSONTarget      string
 	HumanReadable   bool
 	ThrowLinkErrors bool
+
+	// StaticKey is stamped into every emitted feed header. It identifies the
+	// static GTFS dataset whose route map is in use, so consumers can verify
+	// the proto against the matching static ZIP.
+	StaticKey string
 }
 
 // exclusiveHttpClient is a pair of *html.Client and *sync.Mutex
@@ -116,7 +121,7 @@ func Make(client *http.Client, routeMap map[string]sort.StringSlice, opts Option
 	// Export to a GTFS-Realtime file
 	if opts.GtfsRtTarget != "" {
 		log.Println("Exporting to GTFS-Realtime")
-		container.SavePB(opts.GtfsRtTarget, opts.HumanReadable)
+		container.SavePB(opts.GtfsRtTarget, opts.HumanReadable, opts.StaticKey)
 	}
 	return
 }
@@ -125,9 +130,17 @@ func Make(client *http.Client, routeMap map[string]sort.StringSlice, opts Option
 type routesResource struct {
 	Resource util.Resource
 	RouteMap map[string]sort.StringSlice
+
+	// StaticKey identifies the static dataset RouteMap was loaded from.
+	// It is only replaced together with RouteMap, so a failed reload leaves
+	// the previous key and mapping intact.
+	StaticKey string
 }
 
-// Update automatically updates the RouteMap if the Resource has changed
+// Update automatically updates the RouteMap if the Resource has changed.
+// The route map and static key are swapped only after the new GTFS has been
+// fetched, parsed and fully loaded - any error in between keeps serving the
+// previous dataset, so emitted protos stay verifiable against the old key.
 func (rr *routesResource) Update() error {
 	// Check for GTFS updates
 	shouldUpdate, err := rr.Resource.Check()
@@ -154,10 +167,21 @@ func (rr *routesResource) Update() error {
 		defer gtfsObj.Close()
 
 		// Load GTFS routers
-		rr.RouteMap, err = gtfs.ListGtfsRoutes(gtfsObj)
+		newRouteMap, err := gtfs.ListGtfsRoutes(gtfsObj)
 		if err != nil {
 			return err
 		}
+
+		// Resolve the static key before committing any state change.
+		newKey, err := gtfsObj.StaticKey()
+		if err != nil {
+			return err
+		}
+
+		// Both derived artifacts are ready - commit the swap together.
+		rr.RouteMap = newRouteMap
+		rr.StaticKey = newKey
+		log.Printf("GTFS reloaded, static key is now %q", newKey)
 	}
 	return nil
 }
@@ -202,8 +226,12 @@ func Loop(client *http.Client, gtfsResource util.Resource, sleepTime time.Durati
 				time.Sleep(sleep)
 			}
 
-			// Try to update the GTFS-RT
-			err = Make(client, rr.RouteMap, opts)
+			// Try to update the GTFS-RT.
+			// Stamp every proto with the static key of the dataset whose
+			// route map is currently in use.
+			loopOpts := opts
+			loopOpts.StaticKey = rr.StaticKey
+			err = Make(client, rr.RouteMap, loopOpts)
 
 			// If no errors were encountered, break out of the backoff loop
 			if err == nil {

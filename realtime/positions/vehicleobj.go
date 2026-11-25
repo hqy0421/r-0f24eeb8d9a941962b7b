@@ -6,10 +6,9 @@ import (
 	"slices"
 	"time"
 
+	"github.com/MKuranowski/WarsawGTFS/realtime/rtstatic"
 	"github.com/MKuranowski/WarsawGTFS/realtime/util"
 	gtfsrt "github.com/MobilityData/gtfs-realtime-bindings/golang/gtfs"
-	"google.golang.org/protobuf/encoding/prototext"
-	"google.golang.org/protobuf/proto"
 )
 
 // Vehicle is an object for representing a single vehicle position
@@ -241,24 +240,12 @@ func (vc *VehicleContainer) AsProto() *gtfsrt.FeedMessage {
 	return msg
 }
 
-// SavePB marshalls the container into a GTFS-Realtime protocol buffer file
-func (vc *VehicleContainer) SavePB(target string, humanReadable bool) (err error) {
-	// Marshall to GTFS-RT
-	var b []byte
-	if humanReadable {
-		b, err = prototext.Marshal(vc.AsProto())
-	} else {
-		b, err = proto.Marshal(vc.AsProto())
-	}
-
-	// Check for marshall errors
-	if err != nil {
-		return
-	}
-
-	// Write to target file
-	err = os.WriteFile(target, b, 0o666)
-	return
+// SavePB marshalls the container into a GTFS-Realtime protocol buffer file.
+// The staticKey is stamped into the feed header (GTFS-RT v3 feed_version
+// field) so consumers can verify the proto against the static dataset it was
+// built from. The file is written atomically (temp file + rename).
+func (vc *VehicleContainer) SavePB(target string, humanReadable bool, staticKey string) (err error) {
+	return rtstatic.WriteFileAtomic(target, vc.AsProto(), staticKey, humanReadable)
 }
 
 // Prepare initializes the vehiclecontainer.Vehicles map with

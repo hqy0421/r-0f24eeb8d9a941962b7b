@@ -78,6 +78,41 @@ If they are not, `go mod download` explicitly downloads the dependencies.
 Position data are mostly based on data from [https://dane.um.warszawa.pl/](https://dane.um.warszawa.pl/pl/catalogue/f319f602-7292-4e8c-b3d1-f5898aa9a638),
 while alerts are downloaded from <https://www.wtp.waw.pl/utrudnienia/> and <https://www.wtp.waw.pl/zmiany/>
 
+### Static keys and versioned handover
+
+Every emitted GTFS-Realtime proto carries the **static key** of the static
+GTFS dataset it was built from, in `feed_header.feed_version` (the GTFS-RT
+v3.0 field; written with forward-compatible wire encoding so v2 consumers
+simply ignore it). The key is `feed_info.txt`'s `feed_version`, or
+`sha256:<digest>` of the ZIP bytes when the feed declares no version.
+
+Consumers verify a proto against the static dataset they use with the
+`verifyproto` command:
+
+```sh
+go run ./cmd/verifyproto -proto positions.pb -gtfs-file warsaw.zip
+```
+
+A mismatch exits non-zero, so a stale proto handed over during a static
+feed switch is rejected instead of being silently matched against the wrong
+trip IDs.
+
+Operator-side publication is handled by `tools/publish_static.py`
+(stdlib only; run untrusted candidate ZIPs with `python -I`):
+
+```sh
+python -I tools/publish_static.py --store /var/gtfs-store \
+    new_warsaw.zip --positions-proto positions.pb
+```
+
+The store keeps at most two **version pairs** (a static ZIP plus the
+alerts/positions protos generated from it), described in `versions.json`.
+All file and registry writes are temp-file + rename atomic, and a new pair
+is only committed after its protos have been constructed successfully:
+if anything fails between proto construction and the static file switch,
+the previous pair stays fully readable and its protos remain verifiable
+against the old static key.
+
 ### Alerts
 
 Creates the GTFS-Realtime feed with a list of all known alerts.
